@@ -1117,6 +1117,8 @@ class index_dense_gt {
                 return result.failed("Failed to allocate memory to address vectors");
             for (std::uint64_t slot = 0; slot != matrix_rows; ++slot) {
                 byte_t* vector = vectors_tape_allocator_.allocate(matrix_cols);
+                if(!vector)
+                    return result.failed("Failed to allocate memory for the vectors");
                 if (!input(vector, matrix_cols))
                     return result.failed("Failed to read vectors");
                 vectors_lookup_[slot] = vector;

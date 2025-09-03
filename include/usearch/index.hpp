@@ -1686,6 +1686,8 @@ class input_file_t {
     }
     serialization_result_t read(void* begin, std::size_t length) noexcept {
         serialization_result_t result;
+        if(!begin)
+            return result.failed("Begin pointer is null!");
         std::size_t read = std::fread(begin, length, 1, file_);
         if (length && !read) {
             bool reached_eof = std::feof(file_);
@@ -3312,6 +3314,10 @@ class index_gt {
         // Load the nodes
         for (std::size_t i = 0; i != header.size; ++i) {
             span_bytes_t node_bytes = node_malloc_(levels[i]);
+            if(!node_bytes.data()) {
+                reset();
+                return result.failed("Failed to allocate memory for the nodes");
+            }
             if (!input(node_bytes.data(), node_bytes.size())) {
                 reset();
                 return result.failed("Failed to pull nodes from the stream");
