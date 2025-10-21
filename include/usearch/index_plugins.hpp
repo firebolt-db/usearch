@@ -80,14 +80,17 @@
 
 
 // Functions for tracking allocations that are not automatically picked up by PackDB's memory tracker.
-// These functions need to be implemented in PackDB.
+// These functions need to be implemented in PackDB. Note that we do intercept aligned_alloc(..), but
+// by default we do not preempt failed allocations. There would be `firebolt::strict_aligned_alloc(..)`,
+// but that would throw exceptions which do not nicely unwind through the usearch-PackDB boundary. So
+// we have to roll our own interface here.
 namespace firebolt::vector_index {
 
-extern bool track_usearch_mmap(std::size_t count_bytes);
-extern void track_usearch_munmap(std::size_t count_bytes);
+extern void * usearch_mmap(void * addr, size_t len, int prot, int flags, int fd, off_t offset);
+extern void usearch_munmap(void * addr, size_t len);
 
-extern bool track_usearch_aligned_alloc(std::size_t alignment, std::size_t length_bytes);
-extern void track_usearch_free(void * ptr);
+extern void * usearch_aligned_alloc(std::size_t alignment, std::size_t length_bytes);
+extern void usearch_free(void * ptr);
 }
 
 namespace unum {
@@ -825,29 +828,12 @@ class aligned_allocator_gt {
         if (length > length_bytes)
             return nullptr;
         std::size_t alignment = alignment_ak;
-        if(!firebolt::vector_index::track_usearch_aligned_alloc(alignment, length_bytes)) {
-            return nullptr;
-        }
-#if defined(USEARCH_DEFINED_WINDOWS)
-        return (pointer)_aligned_malloc(length_bytes, alignment);
-#elif defined(USEARCH_DEFINED_APPLE) || defined(USEARCH_DEFINED_ANDROID)
-        // Apple Clang keeps complaining that `aligned_alloc` is only available
-        // with macOS 10.15 and newer or Android API >= 28, so let's use `posix_memalign` there.
-        void* result = nullptr;
-        int status = posix_memalign(&result, alignment, length_bytes);
-        return status == 0 ? (pointer)result : nullptr;
-#else
-        return (pointer)aligned_alloc(alignment, length_bytes);
-#endif
+       
+        return static_cast<pointer>(firebolt::vector_index::usearch_aligned_alloc(alignment, length_bytes));
     }
 
     void deallocate(pointer begin, size_type) const {
-        firebolt::vector_index::track_usearch_free(begin);
-#if defined(USEARCH_DEFINED_WINDOWS)
-        _aligned_free(begin);
-#else
-        free(begin);
-#endif
+        firebolt::vector_index::usearch_free(begin);
     }
 };
 
@@ -868,24 +854,12 @@ class page_allocator_t {
      */
     byte_t* allocate(std::size_t count_bytes) const noexcept {
         count_bytes = divide_round_up(count_bytes, page_size()) * page_size();
-        if(!firebolt::vector_index::track_usearch_mmap(count_bytes)) {
-            return nullptr;
-        }
-#if defined(USEARCH_DEFINED_WINDOWS)
-        return (byte_t*)(::VirtualAlloc(NULL, count_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-#else
-        return (byte_t*)mmap(NULL, count_bytes, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-#endif
+        return static_cast<byte_t*>(firebolt::vector_index::usearch_mmap(NULL, count_bytes, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0));
     }
 
     void deallocate(byte_t* page_pointer, std::size_t count_bytes) const noexcept {
-#if defined(USEARCH_DEFINED_WINDOWS)
-        ::VirtualFree(page_pointer, 0, MEM_RELEASE);
-#else
         count_bytes = divide_round_up(count_bytes, page_size()) * page_size();
-        munmap(page_pointer, count_bytes);
-        firebolt::vector_index::track_usearch_munmap(count_bytes);
-#endif
+        firebolt::vector_index::usearch_munmap(page_pointer, count_bytes);
     }
 };
 
