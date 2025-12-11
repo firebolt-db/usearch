@@ -6,6 +6,7 @@
 #include <atomic>  // `std::atomic`
 #include <chrono>  // `std::chrono`
 #include <cstring> // `std::strncmp`
+#include <memory> // `std::allocator`
 #include <thread>  // `std::thread`
 
 #include <usearch/index.hpp> // `expected_gt` and macros
@@ -95,6 +96,29 @@ extern void usearch_free(void * ptr);
 
 namespace unum {
 namespace usearch {
+
+struct nothrow_char_allocator_t {
+    using value_type = char;
+    using pointer = value_type*;
+    using size_type = std::size_t;
+
+    pointer allocate(size_type count) const noexcept {
+        try {
+            return std::allocator<value_type>{}.allocate(count);
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    void deallocate(pointer ptr, size_type count) const noexcept {
+        try {
+        std::allocator<value_type>{}.deallocate(ptr, count);
+        }
+        catch (...) {
+            return;
+        }
+    }
+};
 
 using u40_t = uint40_t;
 enum b1x8_t : unsigned char {};
@@ -2218,7 +2242,7 @@ struct kmeans_clustering_result_t {
  *  - Repeat: Repeat the assignment and update steps until the centroids no longer change significantly
  *            or an early-exit condition is met.
  */
-template <typename allocator_at = std::allocator<char>> class kmeans_clustering_gt {
+class kmeans_clustering_gt {
   public:
     using distance_t = distance_punned_t;
 
@@ -2521,7 +2545,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
     }
 };
 
-using kmeans_clustering_t = kmeans_clustering_gt<>;
+using kmeans_clustering_t = kmeans_clustering_gt;
 
 /**
  *  @brief  C++11 Multi-Hash-Set with Linear Probing.
@@ -2536,13 +2560,13 @@ using kmeans_clustering_t = kmeans_clustering_gt<>;
  *  For every slot we store 2 extra bits for 3 possible states: empty, populated, or deleted.
  *  With linear probing the hashes at the end of the populated region will spill into its first half.
  */
-template <typename element_at, typename hash_at, typename equals_at, typename allocator_at = std::allocator<char>>
+template <typename element_at, typename hash_at, typename equals_at>
 class flat_hash_multi_set_gt {
   public:
     using element_t = element_at;
     using hash_t = hash_at;
     using equals_t = equals_at;
-    using allocator_t = allocator_at;
+    using allocator_t = nothrow_char_allocator_t;
 
     static constexpr std::size_t slots_per_bucket() { return 64; }
     static constexpr std::size_t bytes_per_bucket() {
