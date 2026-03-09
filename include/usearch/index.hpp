@@ -361,7 +361,7 @@ template <typename scalar_at, typename allocator_at = std::allocator<scalar_at>>
 
   public:
     buffer_gt() noexcept : data_(nullptr), size_(0u) {}
-    buffer_gt(std::size_t size) noexcept : data_(allocator_at{}.allocate(size)), size_(data_ ? size : 0u) {
+    buffer_gt(std::size_t size) : data_(allocator_at{}.allocate(size)), size_(data_ ? size : 0u) {
         if (!std::is_trivially_default_constructible<scalar_at>::value)
             for (std::size_t i = 0; i != size_; ++i)
                 construct_at(data_ + i);
@@ -2480,7 +2480,7 @@ class index_gt {
      *  @brief  Increases the `capacity()` of the index to allow adding more vectors.
      *  @return `true` on success, `false` on memory allocation errors.
      */
-    bool try_reserve(index_limits_t limits) usearch_noexcept_m {
+    bool try_reserve(index_limits_t limits) {
 
         if (limits.threads_add <= limits_.threads_add          //
             && limits.threads_search <= limits_.threads_search //
@@ -2524,7 +2524,7 @@ class index_gt {
      *  @warning Unlike STL, won't throw exceptions on memory allocations, so check the return value.
      *  @return `true` on success, `false` on memory allocation errors.
      */
-    bool reserve(index_limits_t limits) usearch_noexcept_m { return try_reserve(limits); }
+    bool reserve(index_limits_t limits) { return try_reserve(limits); }
 
 #if defined(USEARCH_USE_PRAGMA_REGION)
 #pragma endregion

@@ -2720,7 +2720,7 @@ class flat_hash_multi_set_gt {
         capacity_slots_ = 0;
     }
 
-    bool try_reserve(std::size_t capacity) noexcept {
+    bool try_reserve(std::size_t capacity) {
         if (capacity * 3u <= capacity_slots_ * 2u)
             return true;
 
@@ -3050,7 +3050,7 @@ class flat_hash_multi_set_gt {
             usearch_raise_runtime_error("failed to reserve memory");
     }
 
-    bool try_emplace(element_t const& element) noexcept {
+    bool try_emplace(element_t const& element) {
         // Check if we need to resize
         if (populated_slots_ * 3u >= capacity_slots_ * 2u)
             if (!try_reserve(populated_slots_ + 1))
