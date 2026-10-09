@@ -2795,8 +2795,16 @@ class index_gt {
 
         // From `new_target_level` down - perform proper extensive search
         for (level_t level = (std::min)(new_target_level, max_level_copy); level >= 0; --level) {
-            // TODO: Handle out of memory conditions
-            search_to_insert_(value, metric, prefetch, closest_slot, level, config.expansion, context);
+            /// -----
+            /// Firebolt-specific patch
+            /// Out of memory while finding this level's neighbours. Linking from the incomplete candidate list would
+            /// also pick a wrong starting point for the next level down, so stop here. The node is already in the
+            /// graph and keeps the links made on the levels above. If this level is below its top level, it has no
+            /// neighbours on the bottom level, so a search that reaches the bottom level through it finds only this
+            /// node.
+            if (!search_to_insert_(value, metric, prefetch, closest_slot, level, config.expansion, context))
+                return result.failed("Out of memory!");
+            /// -----
             candidates_view_t closest_view;
             {
                 node_lock_t new_lock = node_lock_(new_slot);
