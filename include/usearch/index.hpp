@@ -2279,6 +2279,7 @@ class index_gt {
     std::size_t capacity() const noexcept { return nodes_capacity_; }
     std::size_t size() const noexcept { return nodes_count_; }
     std::size_t max_level() const noexcept { return nodes_count_ ? static_cast<std::size_t>(max_level_) : 0; }
+    std::size_t slot_level(std::size_t slot) const noexcept { return static_cast<std::size_t>(node_at_(slot).level()); }
     index_config_t const& config() const noexcept { return config_; }
     index_limits_t const& limits() const noexcept { return limits_; }
     bool is_immutable() const noexcept { return bool(viewed_file_); }

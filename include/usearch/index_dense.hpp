@@ -12,6 +12,7 @@
 #include <usearch/index_plugins.hpp>
 
 #if defined(USEARCH_DEFINED_CPP17)
+#include <limits>       // `std::numeric_limits`
 #include <shared_mutex> // `std::shared_mutex`
 #endif
 
@@ -170,6 +171,25 @@ struct index_dense_clustering_config_t {
 struct index_dense_serialization_config_t {
     bool exclude_vectors = false;
     bool use_64_bit_dimensions = false;
+};
+
+/**
+ *  @brief  Firebolt: serves the vectors of an index loaded with `exclude_vectors`, e.g. from a
+ *          bounded cache over the index file. Only searches are supported on such an index.
+ *
+ *  `acquire` returns the vector of a slot, or nullptr if it cannot be provided; the distance to
+ *  it is then reported as the maximum. The bytes may be overwritten concurrently, so the caller
+ *  uses them only until `release`, and discards the result and acquires again if `release`
+ *  returns false.
+ */
+struct external_vectors_t {
+    void* context = nullptr;
+    byte_t const* (*acquire)(void* context, std::size_t slot, std::uint64_t& token) noexcept = nullptr;
+    bool (*release)(void* context, std::size_t slot, std::uint64_t token) noexcept = nullptr;
+    /// Optional: announces the slots a search is about to measure, so that they can be fetched together.
+    void (*prefetch)(void* context, std::uint32_t const* slots, std::size_t count) noexcept = nullptr;
+
+    explicit operator bool() const noexcept { return acquire != nullptr; }
 };
 
 struct index_dense_copy_config_t : public index_copy_config_t {
@@ -415,6 +435,26 @@ class index_dense_gt {
     using member_iterator_t = typename index_t::member_iterator_t;
     using member_citerator_t = typename index_t::member_citerator_t;
 
+    /// @brief Firebolt: hands the slots a search is about to measure to `external_vectors_t::prefetch`.
+    struct external_prefetch_t {
+        external_vectors_t const* vectors;
+
+        template <typename iterator_at> void operator()(iterator_at begin, iterator_at end) const noexcept {
+            constexpr std::size_t batch_capacity = 64;
+            std::uint32_t slots[batch_capacity];
+            std::size_t count = 0;
+            for (; begin != end; ++begin) {
+                slots[count++] = static_cast<std::uint32_t>(get_slot(begin));
+                if (count == batch_capacity) {
+                    vectors->prefetch(vectors->context, slots, count);
+                    count = 0;
+                }
+            }
+            if (count)
+                vectors->prefetch(vectors->context, slots, count);
+        }
+    };
+
     /// @brief Punned metric object.
     class metric_proxy_t {
         index_dense_gt const* index_ = nullptr;
@@ -422,11 +462,25 @@ class index_dense_gt {
       public:
         metric_proxy_t(index_dense_gt const& index) noexcept : index_(&index) {}
 
-        inline distance_t operator()(byte_t const* a, member_cref_t b) const noexcept { return f(a, v(b)); }
-        inline distance_t operator()(member_cref_t a, member_cref_t b) const noexcept { return f(v(a), v(b)); }
+        inline distance_t operator()(byte_t const* a, member_cref_t b) const noexcept {
+            if (index_->external_vectors_)
+                return external_f(a, get_slot(b));
+            return f(a, v(b));
+        }
+        inline distance_t operator()(member_cref_t a, member_cref_t b) const noexcept {
+            if (index_->external_vectors_)
+                return external_f(get_slot(a), get_slot(b));
+            return f(v(a), v(b));
+        }
 
-        inline distance_t operator()(byte_t const* a, member_citerator_t b) const noexcept { return f(a, v(b)); }
+        inline distance_t operator()(byte_t const* a, member_citerator_t b) const noexcept {
+            if (index_->external_vectors_)
+                return external_f(a, get_slot(b));
+            return f(a, v(b));
+        }
         inline distance_t operator()(member_citerator_t a, member_citerator_t b) const noexcept {
+            if (index_->external_vectors_)
+                return external_f(get_slot(a), get_slot(b));
             return f(v(a), v(b));
         }
 
@@ -435,6 +489,39 @@ class index_dense_gt {
         inline byte_t const* v(member_cref_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
         inline byte_t const* v(member_citerator_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
         inline distance_t f(byte_t const* a, byte_t const* b) const noexcept { return index_->metric_(a, b); }
+
+        distance_t external_f(byte_t const* a, std::size_t b_slot) const noexcept {
+            external_vectors_t const& vectors = index_->external_vectors_;
+            for (;;) {
+                std::uint64_t token = 0;
+                byte_t const* b = vectors.acquire(vectors.context, b_slot, token);
+                if (!b)
+                    return std::numeric_limits<distance_t>::max();
+                distance_t result = f(a, b);
+                if (vectors.release(vectors.context, b_slot, token))
+                    return result;
+            }
+        }
+        distance_t external_f(std::size_t a_slot, std::size_t b_slot) const noexcept {
+            external_vectors_t const& vectors = index_->external_vectors_;
+            for (;;) {
+                std::uint64_t a_token = 0;
+                byte_t const* a = vectors.acquire(vectors.context, a_slot, a_token);
+                if (!a)
+                    return std::numeric_limits<distance_t>::max();
+                std::uint64_t b_token = 0;
+                byte_t const* b = vectors.acquire(vectors.context, b_slot, b_token);
+                if (!b) {
+                    vectors.release(vectors.context, a_slot, a_token);
+                    return std::numeric_limits<distance_t>::max();
+                }
+                distance_t result = f(a, b);
+                bool b_valid = vectors.release(vectors.context, b_slot, b_token);
+                bool a_valid = vectors.release(vectors.context, a_slot, a_token);
+                if (a_valid && b_valid)
+                    return result;
+            }
+        }
     };
 
     index_dense_config_t config_;
@@ -458,6 +545,9 @@ class index_dense_gt {
 
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
+
+    /// @brief Firebolt: when set, replaces `vectors_lookup_` for distance calculations.
+    external_vectors_t external_vectors_;
 
     using available_threads_allocator_t = aligned_allocator_gt<std::size_t, 64>;
     using available_threads_t = ring_gt<std::size_t, available_threads_allocator_t>;
@@ -574,6 +664,7 @@ class index_dense_gt {
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
+          external_vectors_(exchange(other.external_vectors_, external_vectors_t{})),
 
           available_threads_(std::move(other.available_threads_)), //
           slot_lookup_(std::move(other.slot_lookup_)),             //
@@ -599,6 +690,7 @@ class index_dense_gt {
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
         std::swap(vectors_lookup_, other.vectors_lookup_);
+        std::swap(external_vectors_, other.external_vectors_);
 
         std::swap(available_threads_, other.available_threads_);
         std::swap(slot_lookup_, other.slot_lookup_);
@@ -691,6 +783,10 @@ class index_dense_gt {
     std::size_t size() const { return typed_->size() - free_keys_.size(); }
     std::size_t capacity() const { return typed_->capacity(); }
     std::size_t max_level() const { return typed_->max_level(); }
+    /// Firebolt: the highest graph level the member in `slot` is linked on.
+    std::size_t slot_level(std::size_t slot) const { return typed_->slot_level(slot); }
+    /// Firebolt: serve the vectors of an index loaded with `exclude_vectors` from `vectors`.
+    void attach_external_vectors(external_vectors_t vectors) noexcept { external_vectors_ = vectors; }
     index_dense_config_t const& config() const { return config_; }
     index_limits_t const& limits() const { return typed_->limits(); }
     double inverse_log_connectivity() const { return typed_->inverse_log_connectivity(); }
@@ -917,7 +1013,8 @@ class index_dense_gt {
         // Once the `slot_lookup_` grows, let's use its capacity as the new
         // target for the `vectors_lookup_` to synchronize allocations and
         // expensive index re-organizations.
-        if (limits.members != vectors_lookup_.size()) {
+        // Firebolt: external vectors replace `vectors_lookup_`.
+        if (!external_vectors_ && limits.members != vectors_lookup_.size()) {
             vectors_lookup_t new_vectors_lookup(limits.members);
             if (!new_vectors_lookup)
                 return false;
@@ -962,6 +1059,7 @@ class index_dense_gt {
         typed_->clear();
         slot_lookup_.clear();
         vectors_lookup_.reset();
+        external_vectors_ = {};
         free_keys_.clear();
         vectors_tape_allocator_.reset();
     }
@@ -983,6 +1081,7 @@ class index_dense_gt {
             typed_->reset();
         slot_lookup_.clear();
         vectors_lookup_.reset();
+        external_vectors_ = {};
         free_keys_.clear();
         vectors_tape_allocator_.reset();
         available_threads_.reset();
@@ -1169,6 +1268,9 @@ class index_dense_gt {
         result = typed_->load_from_stream(std::forward<input_callback_at>(input), std::forward<progress_at>(progress));
         if (!result)
             return result;
+        // Firebolt: without vectors, they are attached afterwards with `attach_external_vectors`.
+        if (config.exclude_vectors)
+            matrix_rows = typed_->size();
         if (typed_->size() != static_cast<std::size_t>(matrix_rows))
             return result.failed("Index size and the number of vectors doesn't match");
         old_limits.members = static_cast<std::size_t>(matrix_rows);
@@ -2095,17 +2197,23 @@ class index_dense_gt {
         search_config.exact = exact;
 
         vector_key_t free_key_copy = free_key_;
+        auto typed_search = [&](auto&& allow) {
+            if (external_vectors_.prefetch)
+                return typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow,
+                                      external_prefetch_t{&external_vectors_});
+            return typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+        };
         if (std::is_same<typename std::decay<predicate_at>::type, dummy_predicate_t>::value) {
             auto allow = [free_key_copy](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy;
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result = typed_search(allow);
             return search_result_t{std::move(typed_result), std::move(lock)};
         } else {
             auto allow = [free_key_copy, &predicate](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy && predicate(member.key);
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result = typed_search(allow);
             return search_result_t{std::move(typed_result), std::move(lock)};
         }
     }
