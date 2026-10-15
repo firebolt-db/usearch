@@ -1788,6 +1788,11 @@ class index_dense_gt {
                         std::forward<executor_at>(executor), std::forward<progress_at>(progress));
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+        /// -----
+        /// Firebolt-specific patch
+        /// The unused copies were in the old `vectors_tape_allocator_`, which is freed when this function returns.
+        unused_vector_copies_ = nullptr;
+        /// -----
         return result;
     }
 
