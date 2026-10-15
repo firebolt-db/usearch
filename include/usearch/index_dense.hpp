@@ -724,7 +724,15 @@ class index_dense_gt {
 
     // The metric and its properties
     metric_t const& metric() const { return metric_; }
-    void change_metric(metric_t metric) { metric_ = std::move(metric); }
+    void change_metric(metric_t metric) {
+        metric_ = std::move(metric);
+        /// -----
+        /// Firebolt-specific patch
+        /// A new metric can need larger vector copies than the unused ones. Dropping them only leaves their memory
+        /// unused until the allocator is reset.
+        unused_vector_copies_ = nullptr;
+        /// -----
+    }
 
     scalar_kind_t scalar_kind() const { return metric_.scalar_kind(); }
     metric_kind_t metric_kind() const { return metric_.metric_kind(); }
