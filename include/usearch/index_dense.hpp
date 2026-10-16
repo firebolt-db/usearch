@@ -453,6 +453,18 @@ class index_dense_gt {
     /// @brief Allocator for the copied vectors, aligned to widest double-precision scalars.
     vectors_tape_allocator_t vectors_tape_allocator_;
 
+    /// -----
+    /// Firebolt-specific patch
+    /// @brief Vector copies that `add_()` allocated for an add that then failed before storing them.
+    ///        They can't be freed: `vectors_tape_allocator_` only frees all its memory at once (its `deallocate()`
+    ///        resets it). Instead, the next add reuses one, so failed adds that are retried don't keep allocating.
+    ///        The list is linked through the copies themselves: each holds the address of the next in its first
+    ///        8 bytes. That fits, because the allocator rounds every allocation up to a multiple of 8 bytes and
+    ///        aligns it to 8.
+    byte_t* unused_vector_copies_ = nullptr;
+    std::mutex unused_vector_copies_mutex_;
+    /// -----
+
     using vectors_lookup_allocator_t = aligned_allocator_gt<byte_t*, 64>;
     using vectors_lookup_t = buffer_gt<byte_t*, vectors_lookup_allocator_t>;
 
@@ -573,6 +585,10 @@ class index_dense_gt {
           metric_(std::move(other.metric_)),           //
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
+          /// -----
+          /// Firebolt-specific patch
+          unused_vector_copies_(exchange(other.unused_vector_copies_, nullptr)), //
+          /// -----
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
 
           available_threads_(std::move(other.available_threads_)), //
@@ -598,6 +614,10 @@ class index_dense_gt {
         std::swap(metric_, other.metric_);
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
+        /// -----
+        /// Firebolt-specific patch
+        std::swap(unused_vector_copies_, other.unused_vector_copies_);
+        /// -----
         std::swap(vectors_lookup_, other.vectors_lookup_);
 
         std::swap(available_threads_, other.available_threads_);
@@ -704,7 +724,15 @@ class index_dense_gt {
 
     // The metric and its properties
     metric_t const& metric() const { return metric_; }
-    void change_metric(metric_t metric) { metric_ = std::move(metric); }
+    void change_metric(metric_t metric) {
+        metric_ = std::move(metric);
+        /// -----
+        /// Firebolt-specific patch
+        /// A new metric can need larger vector copies than the unused ones. Dropping them only leaves their memory
+        /// unused until the allocator is reset.
+        unused_vector_copies_ = nullptr;
+        /// -----
+    }
 
     scalar_kind_t scalar_kind() const { return metric_.scalar_kind(); }
     metric_kind_t metric_kind() const { return metric_.metric_kind(); }
@@ -964,6 +992,11 @@ class index_dense_gt {
         vectors_lookup_.reset();
         free_keys_.clear();
         vectors_tape_allocator_.reset();
+        /// -----
+        /// Firebolt-specific patch
+        /// `vectors_tape_allocator_.reset()` above freed the unused copies too.
+        unused_vector_copies_ = nullptr;
+        /// -----
     }
 
     /**
@@ -985,6 +1018,11 @@ class index_dense_gt {
         vectors_lookup_.reset();
         free_keys_.clear();
         vectors_tape_allocator_.reset();
+        /// -----
+        /// Firebolt-specific patch
+        /// `vectors_tape_allocator_.reset()` above freed the unused copies too.
+        unused_vector_copies_ = nullptr;
+        /// -----
         available_threads_.reset();
     }
 
@@ -1758,6 +1796,11 @@ class index_dense_gt {
                         std::forward<executor_at>(executor), std::forward<progress_at>(progress));
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+        /// -----
+        /// Firebolt-specific patch
+        /// The unused copies were in the old `vectors_tape_allocator_`, which is freed when this function returns.
+        unused_vector_copies_ = nullptr;
+        /// -----
         return result;
     }
 
@@ -2047,14 +2090,30 @@ class index_dense_gt {
 
         // Perform the insertion or the update
         bool reuse_node = free_slot != default_free_value<compressed_slot_t>();
+        /// -----
+        /// Firebolt-specific patch
+        /// Allocate the vector copy before adding the node. `on_success` runs once the node is already in the graph,
+        /// too late to fail the add, so an allocation failing there would leave a node without its vector.
+        byte_t* vector_copy = nullptr;
+        bool vector_copy_used = false;
+        if (copy_vector && !reuse_node) {
+            vector_copy = take_unused_vector_copy_();
+            if (!vector_copy)
+                vector_copy = vectors_tape_allocator_.allocate(metric_.bytes_per_vector());
+            if (!vector_copy)
+                return add_result_t{}.failed("Out of memory!");
+        }
+        /// -----
         auto on_success = [&](member_ref_t member) {
             if (config_.enable_key_lookups) {
                 unique_lock_t slot_lock(slot_lookup_mutex_);
                 slot_lookup_.try_emplace(key_and_slot_t{key, static_cast<compressed_slot_t>(member.slot)});
             }
             if (copy_vector) {
-                if (!reuse_node)
-                    vectors_lookup_[member.slot] = vectors_tape_allocator_.allocate(metric_.bytes_per_vector());
+                if (!reuse_node) {
+                    vectors_lookup_[member.slot] = vector_copy;
+                    vector_copy_used = true;
+                }
                 std::memcpy(vectors_lookup_[member.slot], vector_data, metric_.bytes_per_vector());
             } else
                 vectors_lookup_[member.slot] = (byte_t*)vector_data;
@@ -2065,10 +2124,35 @@ class index_dense_gt {
         update_config.expansion = config_.expansion_add;
 
         metric_proxy_t metric{*this};
-        return reuse_node //
-                   ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
-                   : typed_->add(key, vector_data, metric, update_config, on_success);
+        /// -----
+        /// Firebolt-specific patch
+        add_result_t result =
+            reuse_node //
+                ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
+                : typed_->add(key, vector_data, metric, update_config, on_success);
+        /// The add failed before `on_success` took the copy. Keep it for the next add (see `unused_vector_copies_`).
+        if (vector_copy && !vector_copy_used)
+            keep_unused_vector_copy_(vector_copy);
+        return result;
+        /// -----
     }
+
+    /// -----
+    /// Firebolt-specific patch
+    byte_t* take_unused_vector_copy_() {
+        std::unique_lock<std::mutex> lock(unused_vector_copies_mutex_);
+        byte_t* copy = unused_vector_copies_;
+        if (copy)
+            std::memcpy(&unused_vector_copies_, copy, sizeof(byte_t*));
+        return copy;
+    }
+
+    void keep_unused_vector_copy_(byte_t* copy) {
+        std::unique_lock<std::mutex> lock(unused_vector_copies_mutex_);
+        std::memcpy(copy, &unused_vector_copies_, sizeof(byte_t*));
+        unused_vector_copies_ = copy;
+    }
+    /// -----
 
     template <typename scalar_at, typename predicate_at>
     search_result_t search_(scalar_at const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread,
