@@ -1126,6 +1126,12 @@ class index_dense_gt {
 
         // Discard all previous memory allocations of `vectors_tape_allocator_`
         index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        /// -----
+        /// Firebolt-specific patch
+        /// An index made empty to be loaded has no threads yet. Keep at least one, as `index_gt` does.
+        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
+        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
+        /// -----
         reset();
 
         // Infer the new index size
@@ -1242,6 +1248,12 @@ class index_dense_gt {
 
         // Discard all previous memory allocations of `vectors_tape_allocator_`
         index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        /// -----
+        /// Firebolt-specific patch
+        /// An index made empty to be loaded has no threads yet. Keep at least one, as `index_gt` does.
+        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
+        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
+        /// -----
         reset();
 
         serialization_result_t result = file.open_if_not();

@@ -4028,7 +4028,12 @@ class index_gt {
                 distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
                 if (top.size() < top_limit || successor_dist < radius) {
                     // This can substantially grow our priority queue:
-                    next.insert({-successor_dist, successor_slot});
+                    /// -----
+                    /// Firebolt-specific patch
+                    /// A dropped candidate is never expanded, which silently cuts the traversal short.
+                    if (!next.insert({-successor_dist, successor_slot}))
+                        return false;
+                    /// -----
                     // This will automatically evict poor matches:
                     top.insert({successor_dist, successor_slot}, top_limit);
                     radius = top.top().distance;
@@ -4116,7 +4121,12 @@ class index_gt {
                 distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
                 if (top.size() < top_limit || successor_dist < radius) {
                     // This can substantially grow our priority queue:
-                    next.insert({-successor_dist, successor_slot});
+                    /// -----
+                    /// Firebolt-specific patch
+                    /// A dropped candidate is never expanded, which silently cuts the traversal short.
+                    if (!next.insert({-successor_dist, successor_slot}))
+                        return false;
+                    /// -----
                     // This will automatically evict poor matches:
                     if (updated_slot != successor_slot)
                         top.insert({successor_dist, successor_slot}, top_limit);
@@ -4192,7 +4202,12 @@ class index_gt {
                 distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
                 if (top.size() < top_limit || successor_dist < radius) {
                     // This can substantially grow our priority queue:
-                    next.insert({-successor_dist, successor_slot});
+                    /// -----
+                    /// Firebolt-specific patch
+                    /// A dropped candidate is never expanded, which silently cuts the traversal short.
+                    if (!next.insert({-successor_dist, successor_slot}))
+                        return false;
+                    /// -----
                     if (is_dummy<predicate_at>() ||
                         predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
                         top.insert({successor_dist, successor_slot}, top_limit);
